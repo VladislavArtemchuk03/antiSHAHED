@@ -8,6 +8,7 @@ export default defineConfig(({ mode }) => {
   const apiPath = token ? '/v1/alerts/active.json' : '/v3/alerts/active.md'
 
   return {
+    base: process.env.GITHUB_ACTIONS ? '/antiSHAHED/' : '/',
     plugins: [react()],
     server: {
       proxy: {

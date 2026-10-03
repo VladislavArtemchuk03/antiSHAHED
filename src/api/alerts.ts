@@ -56,7 +56,10 @@ function parsePublicReport(markdown: string): ActiveAlert[] {
 }
 
 export async function fetchActiveAlerts(signal?: AbortSignal) {
-  const response = await fetch('/api/alerts/active', { signal })
+  const alertsUrl = import.meta.env.DEV
+    ? '/api/alerts/active'
+    : `${import.meta.env.BASE_URL}alerts/active.md`
+  const response = await fetch(alertsUrl, { signal })
 
   if (!response.ok) {
     const payload = await response.json() as AlertsPayload

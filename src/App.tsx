@@ -9,19 +9,25 @@ import {
   RefreshCw,
   ShieldAlert,
   Siren,
+  X,
 } from 'lucide-react'
 import ukraineMap from '@svg-maps/ukraine'
 import { type ActiveAlert, fetchActiveAlerts } from './api/alerts'
 import { RegionAlertsProvider, type RegionAlert, type RegionState, useRegionAlert } from './hooks/useRegionAlert'
 import './App.css'
 import './districts.css'
+import './district-map.css'
 import { districtsByRegion } from './data/districts'
+import type { LegacyDistrictPath } from './data/legacyDistrictMaps'
 
 type SvgMapLocation = { id: string; name: string; path: string }
 
 const mapLocations = ukraineMap.locations as SvgMapLocation[]
 const extraTerritories = [{ id: 'sevastopol', name: 'м. Севастополь' }]
 const displayRegions = [...mapLocations, ...extraTerritories]
+const mapZoomStep = 0.2
+const minimumMapZoom = 1
+const maximumMapZoom = 1.8
 
 const createSafeRegionAlerts = (): Record<string, RegionAlert> => Object.fromEntries(
   displayRegions.map(({ id }) => {
@@ -61,6 +67,16 @@ const alertTypeLabels: Record<string, string> = {
 }
 
 const severity: Record<RegionState, number> = { neutral: 0, safe: 1, warning: 2, alert: 3 }
+const districtStatusText: Record<RegionState, string> = {
+  alert: 'тривога', warning: 'попередження', safe: 'спокій', neutral: 'дані недоступні',
+}
+const ukrainianLatin: Record<string, string> = {
+  а: 'a', б: 'b', в: 'v', г: 'h', ґ: 'g', д: 'd', е: 'e', є: 'ye', ж: 'zh', з: 'z', и: 'y', і: 'i', ї: 'yi', й: 'i',
+  к: 'k', л: 'l', м: 'm', н: 'n', о: 'o', п: 'p', р: 'r', с: 's', т: 't', у: 'u', ф: 'f', х: 'kh', ц: 'ts', ч: 'ch', ш: 'sh', щ: 'shch', ю: 'yu', я: 'ya', ь: '', '’': '', "'": '', '`': '', '-': '', ' ': '',
+}
+const latinUkrainian: Record<string, string> = {
+  a: 'а', b: 'б', c: 'ц', d: 'д', e: 'е', f: 'ф', g: 'ґ', h: 'г', i: 'і', j: 'й', k: 'к', l: 'л', m: 'м', n: 'н', o: 'о', p: 'п', q: 'к', r: 'р', s: 'с', t: 'т', u: 'у', v: 'в', w: 'в', x: 'кс', y: 'и', z: 'з', 'ь': 'ь', 'ї': 'ї', '-': '-', ' ': ' ',
+}
 
 function displayRegionName(regionId: string) {
   if (regionId === 'kyiv-city' || regionId === 'crimea' || regionId === 'sevastopol') return regionNames[regionId]
@@ -100,6 +116,40 @@ function normalizeDistrictName(value: string) {
     .trim()
 }
 
+function legacyDistrictKey(value: string) {
+  return [...value.toLocaleLowerCase('uk-UA')]
+    .map((character) => ukrainianLatin[character] ?? character)
+    .join('')
+    .normalize('NFD')
+    .replace(/\p{Diacritic}/gu, '')
+    .replace(/[^a-z]/g, '')
+}
+
+function ukrainianDistrictName(value: string) {
+  const transliterated = value.toLocaleLowerCase('uk-UA')
+    .replace(/s'kyi\b/gu, 'ський')
+    .replace(/s'ka\b/gu, 'ська')
+    .replace(/s'ke\b/gu, 'ське')
+    .replace(/skyi\b/gu, 'ський')
+    .replace(/ska\b/gu, 'ська')
+    .replace(/ske\b/gu, 'ське')
+    .replace(/shch/gu, 'щ')
+    .replace(/sh/gu, 'ш')
+    .replace(/ch/gu, 'ч')
+    .replace(/zh/gu, 'ж')
+    .replace(/kh/gu, 'х')
+    .replace(/ts/gu, 'ц')
+    .replace(/iu/gu, 'ю')
+    .replace(/ia/gu, 'я')
+    .replace(/ye/gu, 'є')
+    .replace(/yu/gu, 'ю')
+    .replace(/ya/gu, 'я')
+    .replace(/[’`']/gu, 'ь')
+
+  return [...transliterated].map((character) => latinUkrainian[character] ?? character).join('')
+    .replace(/(^|[\s-])(\p{L})/gu, (_, prefix: string, character: string) => `${prefix}${character.toUpperCase()}`)
+}
+
 function applyDistrictAlert(regionAlert: RegionAlert, area: string, state: RegionState, startedAt?: string | number) {
   const name = area.trim()
   const normalizedName = normalizeDistrictName(name)
@@ -124,16 +174,65 @@ const stateForAlert = (alert: ActiveAlert): RegionState => {
 type MapRegionPathProps = SvgMapLocation & {
   label: string
   onSelect: (region: { id: string; name: string }) => void
+  onOpenDistrictMap: (region: { id: string; name: string }) => void
 }
 
-function MapRegionPath({ id, label, path, onSelect }: MapRegionPathProps) {
+function MapRegionPath({ id, label, path, onSelect, onOpenDistrictMap }: MapRegionPathProps) {
   const { state, types } = useRegionAlert(id)
   const statusText = state === 'neutral' ? 'дані недоступні' : types.length > 0 ? types.join(', ') : 'активних тривог немає'
 
   return (
-    <path className={`map-region ${state}`} d={path} onClick={() => onSelect({ id, name: label })}>
-      <title>{`${label}: ${statusText}`}</title>
+    <path className={`map-region ${state}`} d={path} onClick={() => onSelect({ id, name: label })} onDoubleClick={() => onOpenDistrictMap({ id, name: label })}>
+      <title>{`${label}: ${statusText}. Подвійний клік: райони`}</title>
     </path>
+  )
+}
+
+type LegacyDistrictAlert = {
+  id: string
+  name: string
+  state: RegionState
+  startedAt?: string | number
+}
+
+type DistrictMiniMapProps = {
+  districts: LegacyDistrictPath[]
+  regionAlert: RegionAlert
+  selectedDistrictId?: string
+  onSelect: (district: LegacyDistrictAlert) => void
+}
+
+function DistrictMiniMap({ districts, regionAlert, selectedDistrictId, onSelect }: DistrictMiniMapProps) {
+  const liveDistricts = new globalThis.Map(regionAlert.districts.map((district) => [legacyDistrictKey(district.name), district]))
+  const selectedDistrictPath = districts.find((district) => district.id === selectedDistrictId)
+
+  return (
+    <svg className="district-mini-map" viewBox="0 0 1000 1000" preserveAspectRatio="xMidYMid meet" role="img" aria-label="Карта районів">
+      <defs>
+        <pattern id="district-selection-hatch" width="14" height="14" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+          <line x1="0" y1="0" x2="0" y2="14" />
+        </pattern>
+      </defs>
+      {districts.map((district) => {
+        const matchingDistrict = liveDistricts.get(legacyDistrictKey(district.name))
+        const districtAlert: LegacyDistrictAlert = {
+          id: district.id,
+          name: ukrainianDistrictName(district.name),
+          state: matchingDistrict?.state ?? regionAlert.state,
+          startedAt: matchingDistrict?.startedAt ?? regionAlert.startedAt,
+        }
+
+        return <path className={`district-map-area ${districtAlert.state}`} d={district.path} fillRule="evenodd" key={district.id} tabIndex={0} role="button" aria-label={`${districtAlert.name}: ${districtStatusText[districtAlert.state]}`} onClick={() => onSelect(districtAlert)} onKeyDown={(event) => {
+          if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault()
+            onSelect(districtAlert)
+          }
+        }}>
+          <title>{`${districtAlert.name}: ${districtStatusText[districtAlert.state]}`}</title>
+        </path>
+      })}
+      {selectedDistrictPath && <path className="district-map-selection" d={selectedDistrictPath.path} fillRule="evenodd" pointerEvents="none" />}
+    </svg>
   )
 }
 
@@ -164,6 +263,10 @@ function App() {
   const [lastUpdated, setLastUpdated] = useState<string | undefined>()
   const [detailsOpen, setDetailsOpen] = useState(false)
   const [isRefreshing, setIsRefreshing] = useState(false)
+  const [mapZoom, setMapZoom] = useState(minimumMapZoom)
+  const [districtMapRegionId, setDistrictMapRegionId] = useState<string | null>(null)
+  const [selectedDistrict, setSelectedDistrict] = useState<LegacyDistrictAlert | null>(null)
+  const [legacyMaps, setLegacyMaps] = useState<Record<string, LegacyDistrictPath[]> | null>(null)
   const refreshInProgress = useRef(false)
 
   const regionCounts = Object.values(regionAlerts).reduce<Record<RegionState, number>>(
@@ -214,9 +317,14 @@ function App() {
 
   useEffect(() => {
     queueMicrotask(() => void refreshAlerts())
-    const refreshTimer = window.setInterval(() => void refreshAlerts(), 60_000)
+    const refreshTimer = window.setInterval(() => void refreshAlerts(), 30_000)
     return () => window.clearInterval(refreshTimer)
   }, [])
+
+  useEffect(() => {
+    if (!districtMapRegionId || legacyMaps) return
+    void import('./data/legacyDistrictMaps').then(({ legacyDistrictMaps }) => setLegacyMaps(legacyDistrictMaps))
+  }, [districtMapRegionId, legacyMaps])
 
   const navigation = [{ label: 'Карта', icon: Map }]
   const selectedAlertTypes = selectedRegion ? regionAlerts[selectedRegion.id]?.types : undefined
@@ -233,14 +341,21 @@ function App() {
     : bannerAlert.state === 'alert'
       ? `Тривога активна. Початок: ${formatAlertStart(bannerAlert.startedAt)}`
       : `Попередження активне. Початок: ${formatAlertStart(bannerAlert.startedAt)}`
-  const districtStatusText: Record<RegionState, string> = {
-    alert: 'тривога', warning: 'попередження', safe: 'спокій', neutral: 'дані недоступні',
-  }
+  const districtMapAlert = districtMapRegionId ? regionAlerts[districtMapRegionId] : undefined
+  const legacyDistrictPaths = districtMapRegionId && legacyMaps ? legacyMaps[districtMapRegionId] ?? [] : []
   const liveStatusLabel = apiStatus === 'live' ? 'Дані API активні' : apiStatus === 'loading' ? 'Оновлення даних' : 'API недоступне'
   const liveStatusTime = lastUpdated ? new Date(lastUpdated).toLocaleTimeString('uk-UA', { hour: '2-digit', minute: '2-digit' }) : 'Очікування даних'
   const selectMapRegion = (region: { id: string; name: string }) => {
     setSelectedRegion(region)
     setBannerRegionId(region.id)
+  }
+  const openDistrictMap = (region: { id: string; name: string }) => {
+    selectMapRegion(region)
+    setSelectedDistrict(null)
+    setDistrictMapRegionId(region.id)
+  }
+  const zoomMap = (direction: 1 | -1) => {
+    setMapZoom((currentZoom) => Math.min(maximumMapZoom, Math.max(minimumMapZoom, Number((currentZoom + direction * mapZoomStep).toFixed(1)))))
   }
 
   return (
@@ -288,8 +403,8 @@ function App() {
           <section className="map-panel" aria-label="Карта станів регіонів">
             <div className="map-grid" />
             <RegionAlertsProvider value={regionAlerts}>
-              <svg className="ukraine-map" viewBox={ukraineMap.viewBox} role="img" aria-label="Інтерактивна карта регіонів України">
-                {mapLocations.map(({ id, name, path }) => <MapRegionPath id={id} name={name} path={path} label={regionNames[id] ?? name} onSelect={selectMapRegion} key={id} />)}
+              <svg className="ukraine-map" style={{ '--map-zoom': mapZoom } as React.CSSProperties} viewBox={ukraineMap.viewBox} role="img" aria-label="Інтерактивна карта регіонів України">
+                {mapLocations.map(({ id, name, path }) => <MapRegionPath id={id} name={name} path={path} label={regionNames[id] ?? name} onSelect={selectMapRegion} onOpenDistrictMap={openDistrictMap} key={id} />)}
                 <MapTerritoryMarker onSelect={selectMapRegion} />
               </svg>
             </RegionAlertsProvider>
@@ -297,7 +412,11 @@ function App() {
             <div className="map-legend">
               <span><i className="alert" />Повітряна тривога</span><span><i className="warning" />Потенційна загроза</span><span><i className="safe" />Спокій</span><span><i className="neutral" />Немає даних</span>
             </div>
-            <div className="zoom-controls"><button><Plus size={16} /></button><button><Minus size={16} /></button><button className="refresh-control" onClick={() => void refreshAlerts(true)} aria-label="Оновити дані" title="Оновити дані" disabled={isRefreshing}><RefreshCw className={isRefreshing ? 'is-refreshing' : undefined} size={14} /></button></div>
+            <div className="zoom-controls">
+              <button onClick={() => zoomMap(1)} aria-label="Збільшити карту" title="Збільшити карту" disabled={mapZoom === maximumMapZoom}><Plus size={16} /></button>
+              <button onClick={() => zoomMap(-1)} aria-label="Зменшити карту" title="Зменшити карту" disabled={mapZoom === minimumMapZoom}><Minus size={16} /></button>
+              <button className="refresh-control" onClick={() => void refreshAlerts(true)} aria-label="Оновити дані" title="Оновити дані" disabled={isRefreshing}><RefreshCw className={isRefreshing ? 'is-refreshing' : undefined} size={14} /></button>
+            </div>
             <small className="map-source">Контури: <a href="https://mapsvg.com/maps/ukraine" target="_blank" rel="noreferrer">MapSVG / CC BY 4.0</a></small>
           </section>
 
@@ -312,6 +431,23 @@ function App() {
               </span>)}
             </div> : <p className="district-empty">Місто зі спеціальним статусом не входить до складу районів.</p>}
           </section>
+
+          {districtMapAlert && <div className="district-map-overlay">
+            <section className="district-map-dialog" role="dialog" aria-modal="true" aria-label={`Схема районів: ${displayRegionName(districtMapRegionId!)}`}>
+              <header className="district-map-header">
+                <div><span>КАРТА РАЙОНІВ</span><h2>{displayRegionName(districtMapRegionId!)}</h2></div>
+                <button onClick={() => setDistrictMapRegionId(null)} aria-label="Закрити схему районів" title="Закрити"><X size={18} /></button>
+              </header>
+              {legacyMaps === null ? <p className="district-map-empty">Завантаження карти районів…</p> : legacyDistrictPaths.length > 0 ? <>
+                <DistrictMiniMap districts={legacyDistrictPaths} regionAlert={districtMapAlert} selectedDistrictId={selectedDistrict?.id} onSelect={setSelectedDistrict} />
+                <div className={`district-map-status ${selectedDistrict?.state ?? 'safe'}`}>
+                  {selectedDistrict ? <><i />{selectedDistrict.name}: <b>{districtStatusText[selectedDistrict.state]}</b>{selectedDistrict.startedAt !== undefined && selectedDistrict.state !== 'safe' && <time>{formatAlertStart(selectedDistrict.startedAt)}</time>}</> : 'Оберіть район на схемі'}
+                </div>
+                <div className="district-map-legend"><span><i className="alert" />Тривога</span><span><i className="warning" />Попередження</span><span><i className="safe" />Спокій</span><span><i className="neutral" />Немає даних</span></div>
+                <small className="district-map-source">Контури: GADM 4.1</small>
+              </> : <p className="district-map-empty">Для цієї території районний поділ не застосовується.</p>}
+            </section>
+          </div>}
 
         </div>
 

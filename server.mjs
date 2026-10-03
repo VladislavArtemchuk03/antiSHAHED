@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url'
 const app = express()
 const port = Number(process.env.PORT ?? 4173)
 const token = process.env.ALERTS_IN_UA_TOKEN
-const cacheDurationMs = 60_000
+const cacheDurationMs = 30_000
 let cachedResponse = null
 
 app.get('/api/alerts/active', async (_request, response) => {

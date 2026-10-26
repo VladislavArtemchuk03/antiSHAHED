@@ -59,6 +59,7 @@
   height: min(500px, calc(100vh - 230px));
   margin: 12px auto;
   filter: drop-shadow(0 8px 13px #0008);
+  touch-action: none;
 }
 
 .district-map-area {
@@ -72,13 +73,24 @@
 .district-map-area.safe { fill: #159555; }
 .district-map-area.warning { fill: #d8a51d; }
 .district-map-area.alert { fill: #df2836; }
-.district-map-area.neutral { fill: #69737f; }
+.district-map-area.neutral { fill: url(#district-no-data-hatch); }
 
 .district-map-area:hover,
 .district-map-area:focus {
   stroke: #f4fbff;
   filter: brightness(1.2);
   outline: none;
+}
+
+.district-map-area-label {
+  fill: #f2f3f4;
+  font: 700 13px Manrope, sans-serif;
+  paint-order: stroke;
+  stroke: #15191f;
+  stroke-width: 3px;
+  stroke-linejoin: round;
+  pointer-events: none;
+  user-select: none;
 }
 
 .district-map-selection {

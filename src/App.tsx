@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import {
   Bell,
   ChevronRight,
@@ -17,10 +17,12 @@ import { RegionAlertsProvider, type RegionAlert, type RegionState, useRegionAler
 import './App.css'
 import './districts.css'
 import './district-map.css'
+import './reference-map.css'
 import { districtsByRegion } from './data/districts'
 import type { LegacyDistrictPath } from './data/legacyDistrictMaps'
 
 type SvgMapLocation = { id: string; name: string; path: string }
+type SvgViewBox = { x: number; y: number; width: number; height: number }
 
 const mapLocations = ukraineMap.locations as SvgMapLocation[]
 const extraTerritories = [{ id: 'sevastopol', name: 'м. Севастополь' }]
@@ -28,6 +30,40 @@ const displayRegions = [...mapLocations, ...extraTerritories]
 const mapZoomStep = 0.2
 const minimumMapZoom = 1
 const maximumMapZoom = 1.8
+const initialMapViewBox = parseViewBox(ukraineMap.viewBox)
+const initialDistrictViewBox: SvgViewBox = { x: 0, y: 0, width: 1000, height: 1000 }
+
+function parseViewBox(value: string): SvgViewBox {
+  const [x, y, width, height] = value.trim().split(/[\s,]+/u).map(Number)
+  if ([x, y, width, height].every(Number.isFinite) && width > 0 && height > 0) return { x, y, width, height }
+  throw new Error(`Invalid SVG viewBox: ${value}`)
+}
+
+function serializeViewBox(viewBox: SvgViewBox) {
+  return `${viewBox.x} ${viewBox.y} ${viewBox.width} ${viewBox.height}`
+}
+
+function svgPointFromClient(svg: SVGSVGElement, clientX: number, clientY: number) {
+  const screenMatrix = svg.getScreenCTM()
+  if (!screenMatrix) return null
+  const point = svg.createSVGPoint()
+  point.x = clientX
+  point.y = clientY
+  return point.matrixTransform(screenMatrix.inverse())
+}
+
+function zoomedViewBox(current: SvgViewBox, initial: SvgViewBox, currentZoom: number, nextZoom: number, anchor: { x: number; y: number }): SvgViewBox {
+  if (nextZoom === minimumMapZoom) return initial
+  const ratio = currentZoom / nextZoom
+  const width = current.width * ratio
+  const height = current.height * ratio
+  return {
+    x: anchor.x - (anchor.x - current.x) * ratio,
+    y: anchor.y - (anchor.y - current.y) * ratio,
+    width,
+    height,
+  }
+}
 
 const createSafeRegionAlerts = (): Record<string, RegionAlert> => Object.fromEntries(
   displayRegions.map(({ id }) => {
@@ -47,6 +83,17 @@ const regionNames: Record<string, string> = {
   kyiv: 'Київська', 'kyiv-city': 'м. Київ', luhansk: 'Луганська', lviv: 'Львівська', mykolaiv: 'Миколаївська', sevastopol: 'м. Севастополь',
   odessa: 'Одеська', poltava: 'Полтавська', rivne: 'Рівненська', sumy: 'Сумська', ternopil: 'Тернопільська',
   vinnytsia: 'Вінницька', volyn: 'Волинська', zakarpattia: 'Закарпатська', zaporizhia: 'Запорізька', zhytomyr: 'Житомирська',
+}
+
+const regionAbbreviations: Record<string, string> = {
+  cherkasy: 'ЧЕРКАСИ', chernihiv: 'ЧЕРНІГІВ', chernivtsi: 'ЧЕРНІВЦІ', crimea: 'КРИМ',
+  dnipropetrovsk: 'ДНІПРО', donetsk: 'ДОНЕЧЧ.', 'ivano-frankivsk': 'ІВАНО-ФР.',
+  kharkiv: 'ХАРКІВ', kherson: 'ХЕРСОН', khmelnytskyi: 'ХМЕЛЬН.',
+  kirovohrad: 'КІРОВОГР.', kyiv: 'КИЇВ ОБЛ.', 'kyiv-city': 'М. КИЇВ',
+  luhansk: 'ЛУГАНСЬК', lviv: 'ЛЬВІВ', mykolaiv: 'МИКОЛАЇВ', sevastopol: 'СЕВАСТ.',
+  odessa: 'ОДЕСА', poltava: 'ПОЛТАВА', rivne: 'РІВНЕ', sumy: 'СУМИ',
+  ternopil: 'ТЕРНОПІЛЬ', vinnytsia: 'ВІННИЦЯ', volyn: 'ВОЛИНЬ',
+  zakarpattia: 'ЗАКАРП.', zaporizhia: 'ЗАПОРІЖЖЯ', zhytomyr: 'ЖИТОМИР',
 }
 
 const apiLocationToRegion: Record<string, string> = {
@@ -147,7 +194,68 @@ function ukrainianDistrictName(value: string) {
     .replace(/[’`']/gu, 'ь')
 
   return [...transliterated].map((character) => latinUkrainian[character] ?? character).join('')
+    .replace(/киіево/giu, 'києво')
+    .replace(/киіев/giu, 'київ')
+    .replace(/кагарлитський/giu, 'кагарлицький')
+    .replace(/переяслав-хмельнитська/giu, 'переяслав-хмельницька')
+    .replace(/переяслав-хмельнитський/giu, 'переяслав-хмельницький')
+    .replace(/ï/gu, 'ї')
+    .replace(/зґур/giu, 'згур')
     .replace(/(^|[\s-])(\p{L})/gu, (_, prefix: string, character: string) => `${prefix}${character.toUpperCase()}`)
+}
+
+function districtLabels(districts: LegacyDistrictPath[]) {
+  const stems = districts.map(({ name }) => ukrainianDistrictName(name).replace(/(?:ський|цький|зький|ська|цька|зька|ське|цьке|зьке)$/u, ''))
+  const labelIndexes = districts.flatMap((_, index) => {
+    const sameName = districts
+      .map((candidate, candidateIndex) => ({ candidate, candidateIndex }))
+      .filter(({ candidateIndex }) => stems[candidateIndex] === stems[index])
+    if (!stems[index]) return []
+    if (sameName.length === 1) return [index]
+
+    const preferred = sameName.find(({ candidate }) => ukrainianDistrictName(candidate.name).endsWith('ська'))
+      ?? sameName.reduce((longest, current) => current.candidate.path.length > longest.candidate.path.length ? current : longest)
+    return preferred.candidateIndex === index ? [index] : []
+  })
+  return new globalThis.Map(labelIndexes.map((index) => {
+    const district = districts[index]
+    const letters = [...stems[index]]
+    let length = Math.min(5, letters.length)
+    while (length < letters.length && labelIndexes.some((otherIndex) => otherIndex !== index && [...stems[otherIndex]].slice(0, length).join('') === letters.slice(0, length).join(''))) {
+      length += 1
+    }
+    return [district.id, `${letters.slice(0, length).join('')}.`]
+  }))
+}
+
+function findPathLabelCenter(path: SVGPathElement) {
+  const bounds = path.getBBox()
+  if (!bounds.width || !bounds.height) return null
+
+  const totalLength = path.getTotalLength()
+  const sampleCount = Math.max(24, Math.min(128, Math.ceil(totalLength / 20)))
+  const boundary = Array.from({ length: sampleCount }, (_, index) => path.getPointAtLength(totalLength * index / sampleCount))
+  let bestPoint: { x: number; y: number } | null = null
+  let bestDistance = 0
+  const gridSteps = 16
+
+  for (let row = 1; row < gridSteps; row += 1) {
+    for (let column = 1; column < gridSteps; column += 1) {
+      const point = {
+        x: bounds.x + bounds.width * column / gridSteps,
+        y: bounds.y + bounds.height * row / gridSteps,
+      }
+      if (!path.isPointInFill(point)) continue
+
+      const nearestBoundary = boundary.reduce((distance, edge) => Math.min(distance, Math.hypot(point.x - edge.x, point.y - edge.y)), Number.POSITIVE_INFINITY)
+      if (nearestBoundary > bestDistance) {
+        bestDistance = nearestBoundary
+        bestPoint = point
+      }
+    }
+  }
+
+  return bestPoint ?? { x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2 }
 }
 
 function applyDistrictAlert(regionAlert: RegionAlert, area: string, state: RegionState, startedAt?: string | number) {
@@ -173,17 +281,22 @@ const stateForAlert = (alert: ActiveAlert): RegionState => {
 
 type MapRegionPathProps = SvgMapLocation & {
   label: string
-  onSelect: (region: { id: string; name: string }) => void
   onOpenDistrictMap: (region: { id: string; name: string }) => void
 }
 
-function MapRegionPath({ id, label, path, onSelect, onOpenDistrictMap }: MapRegionPathProps) {
+function MapRegionPath({ id, label, path, onOpenDistrictMap }: MapRegionPathProps) {
   const { state, types } = useRegionAlert(id)
   const statusText = state === 'neutral' ? 'дані недоступні' : types.length > 0 ? types.join(', ') : 'активних тривог немає'
+  const region = { id, name: label }
 
   return (
-    <path className={`map-region ${state}`} d={path} onClick={() => onSelect({ id, name: label })} onDoubleClick={() => onOpenDistrictMap({ id, name: label })}>
-      <title>{`${label}: ${statusText}. Подвійний клік: райони`}</title>
+    <path data-map-region={id} className={`map-region ${state}`} d={path} tabIndex={0} role="button" aria-label={`${label}: ${statusText}. Натисніть, щоб відкрити райони`} onClick={() => onOpenDistrictMap(region)} onKeyDown={(event) => {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault()
+        onOpenDistrictMap(region)
+      }
+    }}>
+      <title>{`${label}: ${statusText}. Натисніть, щоб відкрити райони`}</title>
     </path>
   )
 }
@@ -199,18 +312,46 @@ type DistrictMiniMapProps = {
   districts: LegacyDistrictPath[]
   regionAlert: RegionAlert
   selectedDistrictId?: string
+  viewBox: SvgViewBox
+  onWheel: (event: WheelEvent, svg: SVGSVGElement) => void
   onSelect: (district: LegacyDistrictAlert) => void
 }
 
-function DistrictMiniMap({ districts, regionAlert, selectedDistrictId, onSelect }: DistrictMiniMapProps) {
+function DistrictMiniMap({ districts, regionAlert, selectedDistrictId, viewBox, onWheel, onSelect }: DistrictMiniMapProps) {
+  const svgRef = useRef<SVGSVGElement>(null)
+  const [districtCenters, setDistrictCenters] = useState<Record<string, { x: number; y: number }>>({})
+  const labels = districtLabels(districts)
   const liveDistricts = new globalThis.Map(regionAlert.districts.map((district) => [legacyDistrictKey(district.name), district]))
   const selectedDistrictPath = districts.find((district) => district.id === selectedDistrictId)
 
+  useLayoutEffect(() => {
+    const paths = svgRef.current?.querySelectorAll<SVGPathElement>('[data-district-id]')
+    if (!paths) return
+
+    const centers = Object.fromEntries([...paths].flatMap((path) => {
+      const center = findPathLabelCenter(path)
+      return center ? [[path.dataset.districtId!, center]] : []
+    }))
+    setDistrictCenters(centers)
+  }, [districts])
+
+  useEffect(() => {
+    const svg = svgRef.current
+    if (!svg) return
+    const handleWheel = (event: WheelEvent) => onWheel(event, svg)
+    svg.addEventListener('wheel', handleWheel, { passive: false })
+    return () => svg.removeEventListener('wheel', handleWheel)
+  }, [onWheel])
+
   return (
-    <svg className="district-mini-map" viewBox="0 0 1000 1000" preserveAspectRatio="xMidYMid meet" role="img" aria-label="Карта районів">
+    <svg ref={svgRef} className="district-mini-map" viewBox={serializeViewBox(viewBox)} preserveAspectRatio="xMidYMid meet" role="img" aria-label="Карта районів">
       <defs>
         <pattern id="district-selection-hatch" width="14" height="14" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
           <line x1="0" y1="0" x2="0" y2="14" />
+        </pattern>
+        <pattern id="district-no-data-hatch" width="12" height="12" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+          <rect width="12" height="12" fill="#69737f" />
+          <path d="M0 0V12" stroke="#fff" strokeDasharray="2 3" strokeWidth="2" />
         </pattern>
       </defs>
       {districts.map((district) => {
@@ -221,8 +362,7 @@ function DistrictMiniMap({ districts, regionAlert, selectedDistrictId, onSelect 
           state: matchingDistrict?.state ?? regionAlert.state,
           startedAt: matchingDistrict?.startedAt ?? regionAlert.startedAt,
         }
-
-        return <path className={`district-map-area ${districtAlert.state}`} d={district.path} fillRule="evenodd" key={district.id} tabIndex={0} role="button" aria-label={`${districtAlert.name}: ${districtStatusText[districtAlert.state]}`} onClick={() => onSelect(districtAlert)} onKeyDown={(event) => {
+        return <path data-district-id={district.id} className={`district-map-area ${districtAlert.state}`} d={district.path} fillRule="evenodd" key={district.id} tabIndex={0} role="button" aria-label={`${districtAlert.name}: ${districtStatusText[districtAlert.state]}`} onClick={() => onSelect(districtAlert)} onKeyDown={(event) => {
           if (event.key === 'Enter' || event.key === ' ') {
             event.preventDefault()
             onSelect(districtAlert)
@@ -232,11 +372,18 @@ function DistrictMiniMap({ districts, regionAlert, selectedDistrictId, onSelect 
         </path>
       })}
       {selectedDistrictPath && <path className="district-map-selection" d={selectedDistrictPath.path} fillRule="evenodd" pointerEvents="none" />}
+      <g className="district-map-labels" aria-hidden="true">
+        {districts.map((district) => {
+          const center = districtCenters[district.id]
+          const label = labels.get(district.id)
+          return center && label && <text className="district-map-area-label" x={center.x} y={center.y} textAnchor="middle" dominantBaseline="central" key={district.id}>{label}</text>
+        })}
+      </g>
     </svg>
   )
 }
 
-function MapTerritoryMarker({ onSelect }: Pick<MapRegionPathProps, 'onSelect'>) {
+function MapTerritoryMarker({ onSelect }: { onSelect: (region: { id: string; name: string }) => void }) {
   const selectTerritory = () => onSelect({ id: 'sevastopol', name: regionNames.sevastopol })
 
   return (
@@ -264,10 +411,29 @@ function App() {
   const [detailsOpen, setDetailsOpen] = useState(false)
   const [isRefreshing, setIsRefreshing] = useState(false)
   const [mapZoom, setMapZoom] = useState(minimumMapZoom)
+  const mapZoomRef = useRef(minimumMapZoom)
+  const [mapViewBox, setMapViewBox] = useState(initialMapViewBox)
+  const mapViewBoxRef = useRef(initialMapViewBox)
   const [districtMapRegionId, setDistrictMapRegionId] = useState<string | null>(null)
+  const districtMapZoomRef = useRef(1)
+  const [districtMapViewBox, setDistrictMapViewBox] = useState(initialDistrictViewBox)
+  const districtMapViewBoxRef = useRef(initialDistrictViewBox)
   const [selectedDistrict, setSelectedDistrict] = useState<LegacyDistrictAlert | null>(null)
   const [legacyMaps, setLegacyMaps] = useState<Record<string, LegacyDistrictPath[]> | null>(null)
+  const mapSvgRef = useRef<SVGSVGElement>(null)
+  const [regionLabelCenters, setRegionLabelCenters] = useState<Record<string, { x: number; y: number }>>({})
   const refreshInProgress = useRef(false)
+
+  useLayoutEffect(() => {
+    const paths = mapSvgRef.current?.querySelectorAll<SVGPathElement>('[data-map-region]')
+    if (!paths) return
+
+    const centers = Object.fromEntries([...paths].flatMap((path) => {
+      const center = findPathLabelCenter(path)
+      return center ? [[path.dataset.mapRegion!, center]] : []
+    }))
+    setRegionLabelCenters(centers)
+  }, [])
 
   const regionCounts = Object.values(regionAlerts).reduce<Record<RegionState, number>>(
     (counts, alert) => ({ ...counts, [alert.state]: counts[alert.state] + 1 }),
@@ -352,17 +518,58 @@ function App() {
   const openDistrictMap = (region: { id: string; name: string }) => {
     selectMapRegion(region)
     setSelectedDistrict(null)
+    districtMapZoomRef.current = 1
+    districtMapViewBoxRef.current = initialDistrictViewBox
+    setDistrictMapViewBox(initialDistrictViewBox)
     setDistrictMapRegionId(region.id)
   }
-  const zoomMap = (direction: 1 | -1) => {
-    setMapZoom((currentZoom) => Math.min(maximumMapZoom, Math.max(minimumMapZoom, Number((currentZoom + direction * mapZoomStep).toFixed(1)))))
+  const applyMainMapZoom = (zoomDelta: number, anchor: { x: number; y: number }) => {
+    const currentZoom = mapZoomRef.current
+    const nextZoom = Math.min(maximumMapZoom, Math.max(minimumMapZoom, Number((currentZoom + zoomDelta).toFixed(2))))
+    if (nextZoom === currentZoom) return
+    const nextViewBox = zoomedViewBox(mapViewBoxRef.current, initialMapViewBox, currentZoom, nextZoom, anchor)
+    mapZoomRef.current = nextZoom
+    mapViewBoxRef.current = nextViewBox
+    setMapZoom(nextZoom)
+    setMapViewBox(nextViewBox)
   }
+  const zoomMap = (direction: 1 | -1) => {
+    const viewBox = mapViewBoxRef.current
+    applyMainMapZoom(direction * mapZoomStep, { x: viewBox.x + viewBox.width / 2, y: viewBox.y + viewBox.height / 2 })
+  }
+  const zoomMapAtPointer = (event: WheelEvent, svg: SVGSVGElement) => {
+    event.preventDefault()
+    const point = svgPointFromClient(svg, event.clientX, event.clientY)
+    if (!point) return
+    applyMainMapZoom(event.deltaY < 0 ? 0.1 : -0.1, point)
+  }
+  const zoomDistrictMapAtPointer = (event: WheelEvent, svg: SVGSVGElement) => {
+    event.preventDefault()
+    event.stopPropagation()
+    const point = svgPointFromClient(svg, event.clientX, event.clientY)
+    if (!point) return
+    const currentZoom = districtMapZoomRef.current
+    const nextZoom = Math.min(2.8, Math.max(1, Number((currentZoom + (event.deltaY < 0 ? 0.15 : -0.15)).toFixed(2))))
+    if (nextZoom === currentZoom) return
+    const nextViewBox = zoomedViewBox(districtMapViewBoxRef.current, initialDistrictViewBox, currentZoom, nextZoom, point)
+    districtMapZoomRef.current = nextZoom
+    districtMapViewBoxRef.current = nextViewBox
+    setDistrictMapViewBox(nextViewBox)
+  }
+
+  useEffect(() => {
+    const svg = mapSvgRef.current
+    if (!svg) return
+    const handleWheel = (event: WheelEvent) => zoomMapAtPointer(event, svg)
+    svg.addEventListener('wheel', handleWheel, { passive: false })
+    return () => svg.removeEventListener('wheel', handleWheel)
+  }, [zoomMapAtPointer])
 
   return (
     <main className="app-shell">
       <header className="topbar">
         <button className="brand" onClick={() => setActivePage('Карта')} aria-label="Повітряні тривоги, головна">
-          <span className="trident">♜</span>
+          <span className="trident">UA</span>
           <span><strong>Повітряні тривоги</strong><small>Україна</small></span>
         </button>
         <nav className="main-nav" aria-label="Головна навігація">
@@ -394,7 +601,7 @@ function App() {
               <label className="region-picker"><span>Регіон</span><select value={bannerRegionId} onChange={(event) => setBannerRegionId(event.target.value)} aria-label="Оберіть регіон">
                 {displayRegions.map(({ id }) => <option value={id} key={id}>{displayRegionName(id)}</option>)}
               </select></label>
-              <strong>{bannerAlert.state === 'safe' ? <CircleCheck size={16} /> : <Siren size={16} />}{bannerStatus}</strong>
+              <strong>{bannerAlert.state === 'safe' ? <CircleCheck size={16} /> : <Siren size={16} />}{bannerAlert.state === 'warning' ? `Початок: ${formatAlertStart(bannerAlert.startedAt)}` : bannerStatus}</strong>
             </div>
             <button onClick={() => setDetailsOpen((value) => !value)}>Детальніше <ChevronRight size={15} /></button>
             {detailsOpen && <p className="alert-detail">Слідкуйте за офіційними повідомленнями та прямуйте до укриття.</p>}
@@ -403,11 +610,28 @@ function App() {
           <section className="map-panel" aria-label="Карта станів регіонів">
             <div className="map-grid" />
             <RegionAlertsProvider value={regionAlerts}>
-              <svg className="ukraine-map" style={{ '--map-zoom': mapZoom } as React.CSSProperties} viewBox={ukraineMap.viewBox} role="img" aria-label="Інтерактивна карта регіонів України">
-                {mapLocations.map(({ id, name, path }) => <MapRegionPath id={id} name={name} path={path} label={regionNames[id] ?? name} onSelect={selectMapRegion} onOpenDistrictMap={openDistrictMap} key={id} />)}
+              <svg ref={mapSvgRef} className="ukraine-map" viewBox={serializeViewBox(mapViewBox)} role="img" aria-label="Інтерактивна карта регіонів України">
+                <defs>
+                  <pattern id="main-no-data-hatch" width="12" height="12" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+                    <rect width="12" height="12" fill="#69737f" />
+                    <path d="M0 0V12" stroke="#fff" strokeDasharray="2 3" strokeWidth="2" />
+                  </pattern>
+                </defs>
+                {mapLocations.map(({ id, name, path }) => <MapRegionPath id={id} name={name} path={path} label={regionNames[id] ?? name} onOpenDistrictMap={openDistrictMap} key={id} />)}
                 <MapTerritoryMarker onSelect={selectMapRegion} />
+                <g className="map-region-labels" aria-hidden="true">
+                  {mapLocations.map(({ id, name }) => {
+                    const center = regionLabelCenters[id]
+                    if (!center) return null
+                    const isKyivCity = id === 'kyiv-city'
+                    const x = center.x + (isKyivCity ? 22 : 0)
+                    const y = center.y + (isKyivCity ? 12 : 0)
+                    return <text className={`map-region-label${isKyivCity ? ' city-label' : ''}`} x={x} y={y} textAnchor="middle" dominantBaseline="central" key={id}>{regionAbbreviations[id] ?? name}</text>
+                  })}
+                </g>
               </svg>
             </RegionAlertsProvider>
+            <span className="map-district-hint">Натисніть область, щоб переглянути райони</span>
             {selectedRegion && <span className="selected-region">{selectedRegion.name}: {selectedRegionStatus}</span>}
             <div className="map-legend">
               <span><i className="alert" />Повітряна тривога</span><span><i className="warning" />Потенційна загроза</span><span><i className="safe" />Спокій</span><span><i className="neutral" />Немає даних</span>
@@ -439,7 +663,7 @@ function App() {
                 <button onClick={() => setDistrictMapRegionId(null)} aria-label="Закрити схему районів" title="Закрити"><X size={18} /></button>
               </header>
               {legacyMaps === null ? <p className="district-map-empty">Завантаження карти районів…</p> : legacyDistrictPaths.length > 0 ? <>
-                <DistrictMiniMap districts={legacyDistrictPaths} regionAlert={districtMapAlert} selectedDistrictId={selectedDistrict?.id} onSelect={setSelectedDistrict} />
+                <DistrictMiniMap districts={legacyDistrictPaths} regionAlert={districtMapAlert} selectedDistrictId={selectedDistrict?.id} viewBox={districtMapViewBox} onWheel={zoomDistrictMapAtPointer} onSelect={setSelectedDistrict} />
                 <div className={`district-map-status ${selectedDistrict?.state ?? 'safe'}`}>
                   {selectedDistrict ? <><i />{selectedDistrict.name}: <b>{districtStatusText[selectedDistrict.state]}</b>{selectedDistrict.startedAt !== undefined && selectedDistrict.state !== 'safe' && <time>{formatAlertStart(selectedDistrict.startedAt)}</time>}</> : 'Оберіть район на схемі'}
                 </div>

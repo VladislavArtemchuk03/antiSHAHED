@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import {
   Bell,
   ChevronRight,
@@ -523,7 +523,7 @@ function App() {
     setDistrictMapViewBox(initialDistrictViewBox)
     setDistrictMapRegionId(region.id)
   }
-  const applyMainMapZoom = (zoomDelta: number, anchor: { x: number; y: number }) => {
+  const applyMainMapZoom = useCallback((zoomDelta: number, anchor: { x: number; y: number }) => {
     const currentZoom = mapZoomRef.current
     const nextZoom = Math.min(maximumMapZoom, Math.max(minimumMapZoom, Number((currentZoom + zoomDelta).toFixed(2))))
     if (nextZoom === currentZoom) return
@@ -532,18 +532,18 @@ function App() {
     mapViewBoxRef.current = nextViewBox
     setMapZoom(nextZoom)
     setMapViewBox(nextViewBox)
-  }
+  }, [])
   const zoomMap = (direction: 1 | -1) => {
     const viewBox = mapViewBoxRef.current
     applyMainMapZoom(direction * mapZoomStep, { x: viewBox.x + viewBox.width / 2, y: viewBox.y + viewBox.height / 2 })
   }
-  const zoomMapAtPointer = (event: WheelEvent, svg: SVGSVGElement) => {
+  const zoomMapAtPointer = useCallback((event: WheelEvent, svg: SVGSVGElement) => {
     event.preventDefault()
     const point = svgPointFromClient(svg, event.clientX, event.clientY)
     if (!point) return
     applyMainMapZoom(event.deltaY < 0 ? 0.1 : -0.1, point)
-  }
-  const zoomDistrictMapAtPointer = (event: WheelEvent, svg: SVGSVGElement) => {
+  }, [applyMainMapZoom])
+  const zoomDistrictMapAtPointer = useCallback((event: WheelEvent, svg: SVGSVGElement) => {
     event.preventDefault()
     event.stopPropagation()
     const point = svgPointFromClient(svg, event.clientX, event.clientY)
@@ -555,7 +555,7 @@ function App() {
     districtMapZoomRef.current = nextZoom
     districtMapViewBoxRef.current = nextViewBox
     setDistrictMapViewBox(nextViewBox)
-  }
+  }, [])
 
   useEffect(() => {
     const svg = mapSvgRef.current

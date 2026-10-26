@@ -19,7 +19,7 @@ import './districts.css'
 import './district-map.css'
 import './reference-map.css'
 import { districtsByRegion } from './data/districts'
-import type { LegacyDistrictPath } from './data/legacyDistrictMaps'
+import { loadLegacyDistrictMap, type LegacyDistrictPath } from './data/legacyDistrictMaps'
 
 type SvgMapLocation = { id: string; name: string; path: string }
 type SvgViewBox = { x: number; y: number; width: number; height: number }
@@ -419,7 +419,8 @@ function App() {
   const [districtMapViewBox, setDistrictMapViewBox] = useState(initialDistrictViewBox)
   const districtMapViewBoxRef = useRef(initialDistrictViewBox)
   const [selectedDistrict, setSelectedDistrict] = useState<LegacyDistrictAlert | null>(null)
-  const [legacyMaps, setLegacyMaps] = useState<Record<string, LegacyDistrictPath[]> | null>(null)
+  const [legacyMap, setLegacyMap] = useState<{ regionId: string; paths: LegacyDistrictPath[] } | null>(null)
+  const [districtMapLoadErrorRegionId, setDistrictMapLoadErrorRegionId] = useState<string | null>(null)
   const mapSvgRef = useRef<SVGSVGElement>(null)
   const [regionLabelCenters, setRegionLabelCenters] = useState<Record<string, { x: number; y: number }>>({})
   const refreshInProgress = useRef(false)
@@ -488,9 +489,19 @@ function App() {
   }, [])
 
   useEffect(() => {
-    if (!districtMapRegionId || legacyMaps) return
-    void import('./data/legacyDistrictMaps').then(({ legacyDistrictMaps }) => setLegacyMaps(legacyDistrictMaps))
-  }, [districtMapRegionId, legacyMaps])
+    if (!districtMapRegionId) return
+    let isCurrentRequest = true
+    void loadLegacyDistrictMap(districtMapRegionId).then((paths) => {
+      if (isCurrentRequest) setLegacyMap({ regionId: districtMapRegionId, paths })
+    }).catch((error: unknown) => {
+      if (!isCurrentRequest) return
+      console.error(`Failed to load district map for ${districtMapRegionId}`, error)
+      setDistrictMapLoadErrorRegionId(districtMapRegionId)
+    })
+    return () => {
+      isCurrentRequest = false
+    }
+  }, [districtMapRegionId])
 
   const navigation = [{ label: 'Карта', icon: Map }]
   const selectedAlertTypes = selectedRegion ? regionAlerts[selectedRegion.id]?.types : undefined
@@ -508,7 +519,10 @@ function App() {
       ? `Тривога активна. Початок: ${formatAlertStart(bannerAlert.startedAt)}`
       : `Попередження активне. Початок: ${formatAlertStart(bannerAlert.startedAt)}`
   const districtMapAlert = districtMapRegionId ? regionAlerts[districtMapRegionId] : undefined
-  const legacyDistrictPaths = districtMapRegionId && legacyMaps ? legacyMaps[districtMapRegionId] ?? [] : []
+  const legacyDistrictPaths = districtMapRegionId && legacyMap?.regionId === districtMapRegionId ? legacyMap.paths : []
+  const isDistrictMapLoading = districtMapRegionId !== null
+    && legacyMap?.regionId !== districtMapRegionId
+    && districtMapLoadErrorRegionId !== districtMapRegionId
   const liveStatusLabel = apiStatus === 'live' ? 'Дані API активні' : apiStatus === 'loading' ? 'Оновлення даних' : 'API недоступне'
   const liveStatusTime = lastUpdated ? new Date(lastUpdated).toLocaleTimeString('uk-UA', { hour: '2-digit', minute: '2-digit' }) : 'Очікування даних'
   const selectMapRegion = (region: { id: string; name: string }) => {
@@ -518,6 +532,7 @@ function App() {
   const openDistrictMap = (region: { id: string; name: string }) => {
     selectMapRegion(region)
     setSelectedDistrict(null)
+    setDistrictMapLoadErrorRegionId(null)
     districtMapZoomRef.current = 1
     districtMapViewBoxRef.current = initialDistrictViewBox
     setDistrictMapViewBox(initialDistrictViewBox)
@@ -662,7 +677,7 @@ function App() {
                 <div><span>КАРТА РАЙОНІВ</span><h2>{displayRegionName(districtMapRegionId!)}</h2></div>
                 <button onClick={() => setDistrictMapRegionId(null)} aria-label="Закрити схему районів" title="Закрити"><X size={18} /></button>
               </header>
-              {legacyMaps === null ? <p className="district-map-empty">Завантаження карти районів…</p> : legacyDistrictPaths.length > 0 ? <>
+              {isDistrictMapLoading ? <p className="district-map-empty">Завантаження карти районів…</p> : districtMapLoadErrorRegionId === districtMapRegionId ? <p className="district-map-empty">Не вдалося завантажити карту районів. Спробуйте відкрити її ще раз.</p> : legacyDistrictPaths.length > 0 ? <>
                 <DistrictMiniMap districts={legacyDistrictPaths} regionAlert={districtMapAlert} selectedDistrictId={selectedDistrict?.id} viewBox={districtMapViewBox} onWheel={zoomDistrictMapAtPointer} onSelect={setSelectedDistrict} />
                 <div className={`district-map-status ${selectedDistrict?.state ?? 'safe'}`}>
                   {selectedDistrict ? <><i />{selectedDistrict.name}: <b>{districtStatusText[selectedDistrict.state]}</b>{selectedDistrict.startedAt !== undefined && selectedDistrict.state !== 'safe' && <time>{formatAlertStart(selectedDistrict.startedAt)}</time>}</> : 'Оберіть район на схемі'}
